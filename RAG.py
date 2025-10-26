@@ -22,6 +22,7 @@ class RAG:
     # Constructeur:
     def __init__(self, img):
         self.img_ = img
+        self.segmented_ = None
         self.quad_tree_ = None
         self.size_ = 0
         self.edges_ = []
@@ -441,6 +442,10 @@ class RAG:
 
     # Graphe_Fusion
     def can_merge(self, i, homogeneity=homogeneity_merge, thresh=10):
+        """
+            La liste des sommets voisins du sommet i qui respectent
+            le critère d'homogénité (qui peuvent etre fusionnés)
+        """
         out = []    
         for j in self.adj_dict_[i]:
             if j in self.adj_dict_:
@@ -449,26 +454,43 @@ class RAG:
         return out  
 
     def merge_two_vertices(self, i, j):
+        """
+            Fusionner deux sommets (selon adj_dict)
+        """
+        # Laisser la trace de j dans le noeud de i pour la phase de la segmentation
         if not (j in self.get_node(self.quad_tree_, str(i)).value[0]):
             self.get_node(self.quad_tree_, str(i)).value[0].append(j)
+
+        # éviter de relier i lui-meme
         if i in self.adj_dict_[j]:
             self.adj_dict_[j].remove(i)
+        # propager les sommets voisins de j dans i    
         self.adj_dict_[i].extend(self.adj_dict_[j])
+        # suppression des doublons
         self.adj_dict_[i] = list(set(self.adj_dict_[i]))
+        # suppression du sommet j
         self.adj_dict_.pop(j)
+        # suppression des arretes contenant j
         for k in self.adj_dict_:
             if (k != i and j in self.adj_dict_[k]):
                 self.adj_dict_[k].remove(j)
     
     def merge_all(self, i, thresh):
+        """
+            Fusionner tous les sommets adjacents (récursivement) respectant
+            le critère de l'homogénité
+        """
         merge_list = self.can_merge(i, thresh=thresh)
         while merge_list != []:
-            #print(merge_list)
             for j in merge_list:
                 self.merge_two_vertices(i, j)
             merge_list = self.can_merge(i, thresh=thresh)
 
     def sync_edges_(self):
+        """
+            synchronisation du edges_ avec adj_dict_ pour assurer l'affichage
+            d'un graphe cohérent
+        """
         self.edges_.clear()
         for k1 in self.adj_dict_:
             for k2 in self.adj_dict_:
@@ -492,44 +514,97 @@ class RAG:
     
     # Segmentation de l'image:
     def init_step(self):
+        """
+            Construction de la liste des longueur de pas
+            possible du RAG pour éviter de calculer les meme
+            valeurs plusieurs fois inutilement
+        """
         r, c = self.img_.shape
         steps = []
 
         for i in range(self.profondeur_global()):
+            # a chaque fois qu'on descend d'un niveau le pas
+            # se divise par deux 
             steps.append((r/2**(i+1), c/2**(i+1)))
         return steps    
 
     @staticmethod
     def build_offset_mat(step_x, step_y):
+        """ 
+            Une matrice contenat les combinaisons possible des déplacement
+            en fonction du rang du node 
+            {
+                0 : dx=0, dy=0, 
+                1 : dx=0, dy=step_y
+                2 : dx=step_x, dy=0, 
+                3 : dx=step_x, dy=step_y
+            }  
+        """
         return np.vstack([step_x*np.array([0, 0, 1, 1]), step_y*np.array([0, 1, 0, 1])]).T.astype(int)
     
     def child_rank(self, node):
+        """
+            child_rank retourne le rang, défini comme
+            lindice du child dans la liste des children
+            de son parent, ca sert a determiner le bon
+            offset a l'interieur d'une sous-image 
+
+            Args:
+                node (bigtree.Node) 
+        """
         return node.parent.children.index(node)
 
     def unhash(self, i):
+        """
+            Fait correspondre a un sommet i dans le RAG
+            ses coordonnées dans l'image d'origine
+
+            Args:
+                i (int) : le id du sommet 
+        """
+        assert 0 <= i < self.size_, "id out of range"
+
+        # fonction auxiliaire pour éviter de calculer le pas
+        # de déplacement  chaque fois 
         steps = self.init_step()
         if i == 0:
+            # retourne les coordonnées de l'image d'origine
             return 0, self.img_.shape[0], 0, self.img_.shape[1]
+        
+        # récuperer le sommet et ses parents jusqu'au niveau 1 [1 2 3 4]
         node = self.get_node(self.quad_tree_, str(i))
         ancestors = self.parent_at_level(node)[1]
+        # pointeur de début de la sous-image (il pointe le coin haut-gauche)
         pos = np.array([0, 0], dtype=int)
         for i in range(len(ancestors)):
+            # on récupère le parent
             node = self.get_node(self.quad_tree_, str(ancestors[i]))
-            offset = self.build_offset_mat(*steps[i])
+            # on calcule le nouvel offset
+            offset = self.build_offset_mat(*steps[i])             
             pos = pos + offset[self.child_rank(node)]
 
+        # déduire le reste des coins de l'image
         dI = self.build_offset_mat(*steps[len(ancestors)-1])[3]
         return pos[0], pos[0]+dI[0], pos[1], pos[1]+dI[1]
 
     def launch_segmentation(self):
+        """
+            Segmente l'image d'origine et retourne une image segmentée
+        """
+        # une copie de l'image d'origine pour ne pas
+        # l'écraser
         img = np.zeros(shape=self.img_.shape)
         cpt = 1
         for i in self.adj_dict_:
+            # Retrouver les sous images agrégé en un seul sommet
+            # apres la fusion, a partir de l'arbre quad_tree_ 
             for node in self.get_segment_components(i):
+                # retrouver les coordonnées de la sous-image
                 x_i, x_f, y_i, y_f = self.unhash(node)
+                # étiqueter la region homogene avec la meme etiquette
                 img[x_i:x_f, y_i:y_f] = cpt
             cpt += 1
-        return img    
+        self.segmented_ = img    
 
     # Méthodes d'affichage
     def plot_graph(self):
@@ -573,4 +648,7 @@ class RAG:
         return self.adj_dict_ 
 
     def get_tree_size(self):
-        return self.size_  
+        return self.size_ 
+
+    def get_segmented_img(self):
+        return self.segmented_  
