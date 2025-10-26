@@ -103,7 +103,7 @@ class RAG:
         min_global = min(np.min(img1), np.min(img2))
         return max_global - min_global < thresh
 
-    def quad_tree(self):
+    def quad_tree(self, thresh=2):
         """
             Construire l'arbre étiqueté par des entiers correspondants
             a un parcours en largeur (Breadth First Traversal)
@@ -137,7 +137,7 @@ class RAG:
             # Si l'image d'entrée ne respecte pas le critère
             # d'homogénité qu'on a imposée elle sera divisée 
             # en 4 images. Or, elle aura 4 fils.
-            if not homogeneity_split(img):
+            if not homogeneity_split(img, thresh):
                 sub = self.split_image(img)
                 for i, sub_img in enumerate(sub):
                     # L'appel récursif de la construction des fils
@@ -292,6 +292,14 @@ class RAG:
             node = node.parent
         return p
     
+    def profondeur_global(self):
+        def rec_depth(node):
+            if not node.children:
+                return 1
+            return 1 + max(rec_depth(child) for child in node.children)
+        
+        return rec_depth(self.quad_tree_)-1
+
     def parent_at_level(self, node, level=1):
         """
             Retrouver le predecesseur du node se trouvant au level indiqué
@@ -304,12 +312,14 @@ class RAG:
             Retourne:
                 L'id (int) du predecesseur du node au niveau level
         """
+        predecessors = [int(node.name)]
         if self.profondeur(node) < level:
-            return -1
+            return -1, []
         while (self.profondeur(node) > level):
-            node = node.ancestors.__next__() 
+            node = node.parent
+            predecessors.append(int(node.name)) 
 
-        return node.value[0][0]
+        return node.value[0][0], predecessors[::-1] 
     
     def build_edges(self, edges):
         """
@@ -363,8 +373,8 @@ class RAG:
             e2 = self.get_node(self.quad_tree_, str(edge[1]))
             # Retourne la différence absolue normalisée, selon la définition
             # donnée dans la documentation de la méthode par rapport au niveau1
-            return abs(self.parent_at_level(e1, 1) \
-                    - self.parent_at_level(e2, 1))
+            return abs(self.parent_at_level(e1, 1)[0] \
+                    - self.parent_at_level(e2, 1)[0])
         
         out = []
         
@@ -425,16 +435,16 @@ class RAG:
             tmp_dict[edge[1]].append(edge[0]) 
         self.adj_dict_ = {k : tmp_dict[k] for k in tmp_dict if tmp_dict[k] != []}  
 
-    def split(self):
-        self.quad_tree()
+    def split(self, thresh=2):
+        self.quad_tree(thresh)
         self.build_RAG()     
 
     # Graphe_Fusion
-    def can_merge(self, i, homogeneity=homogeneity_merge):
+    def can_merge(self, i, homogeneity=homogeneity_merge, thresh=10):
         out = []    
         for j in self.adj_dict_[i]:
             if j in self.adj_dict_:
-                if homogeneity(self.get_sub_image_at(i), self.get_sub_image_at(j), thresh=10):
+                if homogeneity(self.get_sub_image_at(i), self.get_sub_image_at(j), thresh):
                     out.append(j)
         return out  
 
@@ -450,13 +460,13 @@ class RAG:
             if (k != i and j in self.adj_dict_[k]):
                 self.adj_dict_[k].remove(j)
     
-    def merge_all(self, i):
-        merge_list = self.can_merge(i)
+    def merge_all(self, i, thresh):
+        merge_list = self.can_merge(i, thresh=thresh)
         while merge_list != []:
             #print(merge_list)
             for j in merge_list:
                 self.merge_two_vertices(i, j)
-            merge_list = self.can_merge(i)
+            merge_list = self.can_merge(i, thresh=thresh)
 
     def sync_edges_(self):
         self.edges_.clear()
@@ -466,11 +476,11 @@ class RAG:
                     and not (k1, k2) in self.edges_ and not (k2, k1) in self.edges_:
                     self.edges_.append((k1, k2))
 
-    def merge(self):
+    def merge(self, thresh=10):
         cpt = 0
         keys = list(self.adj_dict_.keys())
         while cpt < len(keys)-1:
-            self.merge_all(keys[cpt])
+            self.merge_all(keys[cpt], thresh=thresh)
             cpt += 1   
             keys = list(self.adj_dict_.keys())
 
@@ -480,6 +490,47 @@ class RAG:
             self.adj_dict_[edge[0]].append(edge[1])
             self.adj_dict_[edge[1]].append(edge[0])               
     
+    # Segmentation de l'image:
+    def init_step(self):
+        r, c = self.img_.shape
+        steps = []
+
+        for i in range(self.profondeur_global()):
+            steps.append((r/2**(i+1), c/2**(i+1)))
+        return steps    
+
+    @staticmethod
+    def build_offset_mat(step_x, step_y):
+        return np.vstack([step_x*np.array([0, 0, 1, 1]), step_y*np.array([0, 1, 0, 1])]).T.astype(int)
+    
+    def child_rank(self, node):
+        return node.parent.children.index(node)
+
+    def unhash(self, i):
+        steps = self.init_step()
+        if i == 0:
+            return 0, self.img_.shape[0], 0, self.img_.shape[1]
+        node = self.get_node(self.quad_tree_, str(i))
+        ancestors = self.parent_at_level(node)[1]
+        pos = np.array([0, 0], dtype=int)
+        for i in range(len(ancestors)):
+            node = self.get_node(self.quad_tree_, str(ancestors[i]))
+            offset = self.build_offset_mat(*steps[i])
+            pos = pos + offset[self.child_rank(node)]
+
+        dI = self.build_offset_mat(*steps[len(ancestors)-1])[3]
+        return pos[0], pos[0]+dI[0], pos[1], pos[1]+dI[1]
+
+    def launch_segmentation(self):
+        img = np.zeros(shape=self.img_.shape)
+        cpt = 1
+        for i in self.adj_dict_:
+            for node in self.get_segment_components(i):
+                x_i, x_f, y_i, y_f = self.unhash(node)
+                img[x_i:x_f, y_i:y_f] = cpt
+            cpt += 1
+        return img    
+
     # Méthodes d'affichage
     def plot_graph(self):
         """
