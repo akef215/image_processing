@@ -479,6 +479,7 @@ class RAG:
         for edge in self.edges_:
             self.adj_dict_[edge[0]].append(edge[1])
             self.adj_dict_[edge[1]].append(edge[0])               
+    
     # Méthodes d'affichage
     def plot_graph(self):
         """
