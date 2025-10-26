@@ -274,6 +274,14 @@ class RAG:
         """
         return self.get_node(self.quad_tree_, str(i)).value[1]
     
+    def get_segment_components(self, i):
+        """
+            Retourne la liste des id associés au segment
+            représenté par le noeud i
+            C'est pour pouvoir reconstruire les segments
+        """
+        return self.get_node(self.quad_tree_, str(i)).value[0]
+    
     def profondeur(self, node):
         """
             La profondeur d'un noeud
@@ -411,13 +419,66 @@ class RAG:
                 edges_g = list(set(edges_g) - set(edges_vertex))
         
         self.edges_ = edges_g
-        self.adj_dict_ = {i : [] for i in range(self.size_)}
+        tmp_dict = {i : [] for i in range(self.size_)}
         for edge in self.edges_:
-            self.adj_dict_[edge[0]].append(edge[1])
-            self.adj_dict_[edge[1]].append(edge[0]) 
+            tmp_dict[edge[0]].append(edge[1])
+            tmp_dict[edge[1]].append(edge[0]) 
+        self.adj_dict_ = {k : tmp_dict[k] for k in tmp_dict if tmp_dict[k] != []}  
+
+    def split(self):
+        self.quad_tree()
+        self.build_RAG()     
 
     # Graphe_Fusion
+    def can_merge(self, i, homogeneity=homogeneity_merge):
+        out = []    
+        for j in self.adj_dict_[i]:
+            if j in self.adj_dict_:
+                if homogeneity(self.get_sub_image_at(i), self.get_sub_image_at(j), thresh=10):
+                    out.append(j)
+        return out  
 
+    def merge_two_vertices(self, i, j):
+        if not (j in self.get_node(self.quad_tree_, str(i)).value[0]):
+            self.get_node(self.quad_tree_, str(i)).value[0].append(j)
+        if i in self.adj_dict_[j]:
+            self.adj_dict_[j].remove(i)
+        self.adj_dict_[i].extend(self.adj_dict_[j])
+        self.adj_dict_[i] = list(set(self.adj_dict_[i]))
+        self.adj_dict_.pop(j)
+        for k in self.adj_dict_:
+            if (k != i and j in self.adj_dict_[k]):
+                self.adj_dict_[k].remove(j)
+    
+    def merge_all(self, i):
+        merge_list = self.can_merge(i)
+        while merge_list != []:
+            #print(merge_list)
+            for j in merge_list:
+                self.merge_two_vertices(i, j)
+            merge_list = self.can_merge(i)
+
+    def sync_edges_(self):
+        self.edges_.clear()
+        for k1 in self.adj_dict_:
+            for k2 in self.adj_dict_:
+                if k1 != k2 and (k1 in self.adj_dict_[k2] or k2 in self.adj_dict_[k1]) \
+                    and not (k1, k2) in self.edges_ and not (k2, k1) in self.edges_:
+                    self.edges_.append((k1, k2))
+
+    def merge(self):
+        cpt = 0
+        keys = list(self.adj_dict_.keys())
+        while cpt < len(keys)-1:
+            self.merge_all(keys[cpt])
+            cpt += 1   
+            keys = list(self.adj_dict_.keys())
+
+        self.sync_edges_()  
+        self.adj_dict_ = {i : [] for i in self.adj_dict_}
+        for edge in self.edges_:
+            self.adj_dict_[edge[0]].append(edge[1])
+            self.adj_dict_[edge[1]].append(edge[0])               
     # Méthodes d'affichage
     def plot_graph(self):
         """
